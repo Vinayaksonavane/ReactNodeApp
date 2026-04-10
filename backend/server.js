@@ -2,11 +2,39 @@ const express = require("express");
 const cors = require("cors");
 const sql = require("mssql");
 const jwt = require("jsonwebtoken");
+const rateLimit = require("express-rate-limit");
 require("dotenv").config();
 
+// Validate required env vars at startup
+const requiredEnvVars = ["JWT_SECRET", "DB_USER", "DB_PASSWORD", "DB_SERVER", "DB_NAME"];
+requiredEnvVars.forEach(key => {
+    if (!process.env[key]) {
+        console.error(`FATAL: Missing required environment variable: ${key}`);
+        process.exit(1);
+    }
+});
+
 const app = express();
-app.use(cors());
+
+// Bug #11: Restrict CORS to specific allowed origins
+const allowedOrigins = process.env.ALLOWED_ORIGINS
+    ? process.env.ALLOWED_ORIGINS.split(",")
+    : ["http://localhost:3000"];
+
+app.use(cors({
+    origin: allowedOrigins,
+    credentials: true,
+    optionsSuccessStatus: 200
+}));
+
 app.use(express.json());
+
+// Bug #9: Rate limit login endpoint — max 5 attempts per 15 minutes per IP
+const loginLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    message: { message: "Too many login attempts. Please try again after 15 minutes." }
+});
 
 // DB CONFIG
 const dbConfig = {
@@ -23,17 +51,18 @@ const dbConfig = {
 // CONNECT DB
 sql.connect(dbConfig)
     .then(() => console.log("Connected to SQL Server"))
-    .catch(err => console.log(err));
+    .catch(err => {
+        console.error("Database connection failed:", err);
+        process.exit(1);
+    });
 
 // LOGIN API
-app.post("/api/login", async (req, res) => {
+app.post("/api/login", loginLimiter, async (req, res) => {
     const { username, password } = req.body;
-
-    console.log("Login request:", username);
 
     try {
         const result = await sql.query`
-            SELECT * FROM K_USER_DTL 
+            SELECT * FROM K_USER_DTL
             WHERE LOWER(UsrCd) = LOWER(${username})
         `;
 
@@ -42,10 +71,6 @@ app.post("/api/login", async (req, res) => {
         }
 
         const user = result.recordset[0];
-
-        console.log("Input username:", username);
-        console.log("DB user object keys:", Object.keys(user));
-        console.log("DB UsrPwd value:", user.UsrPwd);
 
         if (!user.UsrPwd) {
             return res.status(500).json({ message: "Password missing in DB" });
@@ -66,7 +91,7 @@ app.post("/api/login", async (req, res) => {
         res.json({ token });
 
     } catch (err) {
-        console.log(err);
+        console.error(err);
         res.status(500).json({ error: err.message });
     }
 });
